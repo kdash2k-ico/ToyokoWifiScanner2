@@ -3,8 +3,12 @@ package jp.example.toyokowifiscanner
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
 import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
@@ -15,6 +19,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -24,15 +29,17 @@ class MainActivity : AppCompatActivity() {
 
     private var ssid = ""
     private var password = ""
+    private lateinit var photoFile: File
+    private lateinit var photoUri: Uri
 
     private val cameraLauncher =
         registerForActivityResult(
-            ActivityResultContracts.TakePicturePreview()
-        ) { bitmap: Bitmap? ->
-            if (bitmap == null) {
-                resultText.text = "撮影がキャンセルされました"
+            ActivityResultContracts.TakePicture()
+        ) { success ->
+            if (success) {
+                readPhoto()
             } else {
-                readText(bitmap)
+                resultText.text = "撮影がキャンセルされました"
             }
         }
 
@@ -59,8 +66,20 @@ class MainActivity : AppCompatActivity() {
             text = "撮影して読み取る"
             textSize = 18f
             setOnClickListener {
-                resultText.text = "カメラを起動しています……"
-                cameraLauncher.launch(null)
+                try {
+                    photoFile = File.createTempFile(
+                        "wifi_photo_", ".jpg", cacheDir
+                    )
+                    photoUri = androidx.core.content.FileProvider.getUriForFile(
+                        this@MainActivity,
+                        "$packageName.fileprovider",
+                        photoFile
+                    )
+                    resultText.text = "カメラを起動しています……"
+                    cameraLauncher.launch(photoUri)
+                } catch (e: Exception) {
+                    resultText.text = "カメラ起動エラー：${e.message}"
+                }
             }
         }
 
@@ -105,8 +124,15 @@ class MainActivity : AppCompatActivity() {
         setContentView(scroll)
     }
 
-    private fun readText(bitmap: Bitmap) {
-        resultText.text = "文字を読み取っています……"
+    private fun readPhoto() {
+        resultText.text = "高解像度の写真を読み取っています……"
+
+        val bitmap = BitmapFactory.decodeFile(photoFile.absolutePath)
+
+        if (bitmap == null) {
+            resultText.text = "写真を開けませんでした"
+            return
+        }
 
         val image = InputImage.fromBitmap(bitmap, 0)
         val recognizer = TextRecognition.getClient(
@@ -117,12 +143,10 @@ class MainActivity : AppCompatActivity() {
             .addOnSuccessListener { visionText ->
                 val text = visionText.text
 
-                // SSID：toyoko-inn + 数字4桁
                 ssid = Regex(
                     """(?i)toyoko-inn\d{4}"""
                 ).find(text)?.value ?: ""
 
-                // パスワード：数字8桁
                 password = Regex(
                     """(?<!\d)\d{8}(?!\d)"""
                 ).find(text)?.value ?: ""
@@ -145,6 +169,10 @@ class MainActivity : AppCompatActivity() {
             .addOnFailureListener { error ->
                 resultText.text =
                     "読み取り失敗：${error.message}"
+            }
+            .addOnCompleteListener {
+                bitmap.recycle()
+                photoFile.delete()
             }
     }
 
