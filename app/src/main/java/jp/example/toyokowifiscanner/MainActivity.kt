@@ -5,8 +5,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Bundle
+import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -37,37 +39,36 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        supportActionBar?.hide()
+
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            setPadding(24, 24, 24, 24)
         }
+
+        val scroll = ScrollView(this)
+        scroll.addView(layout)
 
         val title = TextView(this).apply {
             text = "東横INN Wi-Fiスキャナー"
             textSize = 24f
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 24)
         }
 
-        resultText = TextView(this).apply {
-            text = "テレビのWi-Fi情報画面を撮影してください"
-            textSize = 16f
+        val captureButton = Button(this).apply {
+            text = "撮影して読み取る"
+            textSize = 18f
+            setOnClickListener {
+                resultText.text = "カメラを起動しています……"
+                cameraLauncher.launch(null)
+            }
         }
 
         ssidText = TextView(this).apply {
             text = "SSID：未検出"
             textSize = 18f
-        }
-
-        passwordText = TextView(this).apply {
-            text = "パスワード：未検出"
-            textSize = 18f
-        }
-
-        val captureButton = Button(this).apply {
-            text = "撮影して読み取る"
-            setOnClickListener {
-                resultText.text = "カメラを起動しています……"
-                cameraLauncher.launch(null)
-            }
+            setPadding(0, 16, 0, 8)
         }
 
         val copySsidButton = Button(this).apply {
@@ -75,9 +76,23 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { copyText("SSID", ssid) }
         }
 
+        passwordText = TextView(this).apply {
+            text = "パスワード：未検出"
+            textSize = 18f
+            setPadding(0, 16, 0, 8)
+        }
+
         val copyPasswordButton = Button(this).apply {
             text = "パスワードをコピー"
-            setOnClickListener { copyText("パスワード", password) }
+            setOnClickListener {
+                copyText("パスワード", password)
+            }
+        }
+
+        resultText = TextView(this).apply {
+            text = "テレビのWi-Fi情報画面を撮影してください"
+            textSize = 16f
+            setPadding(0, 24, 0, 16)
         }
 
         layout.addView(title)
@@ -88,7 +103,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(copyPasswordButton)
         layout.addView(resultText)
 
-        setContentView(layout)
+        setContentView(scroll)
     }
 
     private fun readText(bitmap: Bitmap) {
@@ -122,26 +137,36 @@ class MainActivity : AppCompatActivity() {
                     else "パスワード：未検出"
 
                 resultText.text =
-                    if (text.isBlank()) "文字を読み取れませんでした"
-                    else "読み取った文字：\n\n$text"
+                    if (text.isBlank()) {
+                        "文字を読み取れませんでした"
+                    } else {
+                        "読み取った文字：\n\n$text"
+                    }
             }
             .addOnFailureListener { error ->
-                resultText.text =
-                    "読み取り失敗：${error.message}"
+                resultText.text = "読み取り失敗：${error.message}"
             }
     }
 
-    private fun findValue(text: String, labels: List<String>): String {
+    private fun findValue(
+        text: String,
+        labels: List<String>
+    ): String {
         val lines = text.lines()
 
         for (i in lines.indices) {
             val line = lines[i].trim()
 
             for (label in labels) {
-                if (line.contains(label, ignoreCase = true)) {
-                    val value = line.substringAfter(label, "")
-                        .trim()
-                        .trimStart(':', '：', '=', ' ')
+                val position = line.indexOf(
+                    label,
+                    ignoreCase = true
+                )
+
+                if (position >= 0) {
+                    val value = line.substring(
+                        position + label.length
+                    ).trim().trimStart(':', '：', '=', ' ')
 
                     if (value.isNotBlank()) return value
 
