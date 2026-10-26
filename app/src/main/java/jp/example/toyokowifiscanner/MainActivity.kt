@@ -38,7 +38,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         supportActionBar?.hide()
 
         val layout = LinearLayout(this).apply {
@@ -118,15 +117,15 @@ class MainActivity : AppCompatActivity() {
             .addOnSuccessListener { visionText ->
                 val text = visionText.text
 
-                ssid = findValue(
-                    text,
-                    listOf("SSID", "Wi-Fi名", "ネットワーク名")
-                )
+                // SSID：toyoko-inn + 数字4桁
+                ssid = Regex(
+                    """(?i)toyoko-inn\d{4}"""
+                ).find(text)?.value ?: ""
 
-                password = findValue(
-                    text,
-                    listOf("パスワード", "PASSWORD", "PASS", "暗号化キー")
-                )
+                // パスワード：数字8桁
+                password = Regex(
+                    """(?<!\d)\d{8}(?!\d)"""
+                ).find(text)?.value ?: ""
 
                 ssidText.text =
                     if (ssid.isNotBlank()) "SSID：$ssid"
@@ -144,41 +143,9 @@ class MainActivity : AppCompatActivity() {
                     }
             }
             .addOnFailureListener { error ->
-                resultText.text = "読み取り失敗：${error.message}"
+                resultText.text =
+                    "読み取り失敗：${error.message}"
             }
-    }
-
-    private fun findValue(
-        text: String,
-        labels: List<String>
-    ): String {
-        val lines = text.lines()
-
-        for (i in lines.indices) {
-            val line = lines[i].trim()
-
-            for (label in labels) {
-                val position = line.indexOf(
-                    label,
-                    ignoreCase = true
-                )
-
-                if (position >= 0) {
-                    val value = line.substring(
-                        position + label.length
-                    ).trim().trimStart(':', '：', '=', ' ')
-
-                    if (value.isNotBlank()) return value
-
-                    if (i + 1 < lines.size) {
-                        val next = lines[i + 1].trim()
-                        if (next.isNotBlank()) return next
-                    }
-                }
-            }
-        }
-
-        return ""
     }
 
     private fun copyText(label: String, value: String) {
