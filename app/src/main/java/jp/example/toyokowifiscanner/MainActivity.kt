@@ -6,26 +6,16 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.ImageFormat
-import android.graphics.SurfaceTexture
-import android.hardware.camera2.CameraCaptureSession
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraDevice
-import android.hardware.camera2.CameraManager
-import android.hardware.camera2.CaptureRequest
-import android.media.ImageReader
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.net.wifi.WifiNetworkSpecifier
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.HandlerThread
 import android.view.Gravity
-import android.view.Surface
-import android.view.TextureView
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
@@ -34,6 +24,7 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -41,34 +32,47 @@ import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var root: LinearLayout
     private lateinit var resultText: TextView
     private lateinit var ssidText: TextView
     private lateinit var passwordText: TextView
     private lateinit var connectButton: Button
-    private lateinit var cameraView: TextureView
 
     private var ssid = ""
     private var password = ""
 
-    private var cameraDevice: CameraDevice? = null
-    private var captureSession: CameraCaptureSession? = null
-
-    private var cameraThread: HandlerThread? = null
-    private var cameraHandler: Handler? = null
-
-    private var cameraId = ""
-
-    private var imageReader: ImageReader? = null
+    private lateinit var photoFile: File
+    private lateinit var photoUri: Uri
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    private val permissionLauncher =
+    /*
+     * カメラ撮影
+     *
+     * 撮影後に確認画面を表示せず、
+     * そのまま readPhoto() に進む。
+     */
+    private val cameraLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.TakePicture()
+        ) { success ->
+
+            if (success) {
+                readPhoto()
+            } else {
+                resultText.text = "撮影がキャンセルされました"
+            }
+        }
+
+    /*
+     * カメラ権限
+     */
+    private val cameraPermissionLauncher =
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
+
             if (granted) {
-                startCamera()
+                launchCamera()
             } else {
                 resultText.text = "カメラの使用を許可してください"
             }
@@ -76,55 +80,79 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         supportActionBar?.hide()
 
-        root = LinearLayout(this).apply {
+        createScreen()
+    }
+
+    /*
+     * 画面を作成
+     */
+    private fun createScreen() {
+
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
         }
 
-        val scroll = ScrollView(this)
-        scroll.addView(root)
+        val scrollView = ScrollView(this)
+        scrollView.addView(root)
 
+        /*
+         * タイトル
+         */
         val title = TextView(this).apply {
             text = "東横INN Wi-Fiスキャナー"
             textSize = 24f
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 20)
+            setPadding(0, 0, 0, 24)
         }
+
         root.addView(title)
 
-        cameraView = TextureView(this).apply {
-            visibility = View.GONE
-        }
-
-        root.addView(
-            cameraView,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                600
-            )
-        )
-
+        /*
+         * 撮影ボタン
+         */
         val captureButton = Button(this).apply {
-            text = "撮影して読み取る"
+            text = "📷 撮影して読み取る"
             textSize = 18f
 
             setOnClickListener {
-                showCamera()
+
+                if (ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+
+                    launchCamera()
+
+                } else {
+
+                    cameraPermissionLauncher.launch(
+                        Manifest.permission.CAMERA
+                    )
+                }
             }
         }
 
         root.addView(captureButton)
 
+        /*
+         * SSID
+         */
         ssidText = TextView(this).apply {
             text = "SSID：未検出"
             textSize = 18f
-            setPadding(0, 16, 0, 8)
+            setPadding(0, 24, 0, 8)
         }
 
         root.addView(ssidText)
 
+        /*
+         * SSIDコピー
+         */
         val copySsidButton = Button(this).apply {
             text = "SSIDをコピー"
 
@@ -135,14 +163,20 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(copySsidButton)
 
+        /*
+         * パスワード
+         */
         passwordText = TextView(this).apply {
             text = "パスワード：未検出"
             textSize = 18f
-            setPadding(0, 16, 0, 8)
+            setPadding(0, 24, 0, 8)
         }
 
         root.addView(passwordText)
 
+        /*
+         * パスワードコピー
+         */
         val copyPasswordButton = Button(this).apply {
             text = "パスワードをコピー"
 
@@ -153,8 +187,13 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(copyPasswordButton)
 
+        /*
+         * Wi-Fi接続ボタン
+         *
+         * OCR成功時だけ表示する。
+         */
         connectButton = Button(this).apply {
-            text = "Wi-Fiに接続"
+            text = "📶 Wi-Fiに接続"
             textSize = 18f
             visibility = View.GONE
 
@@ -165,6 +204,9 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(connectButton)
 
+        /*
+         * 結果表示
+         */
         resultText = TextView(this).apply {
             text = "テレビのWi-Fi情報画面を撮影してください"
             textSize = 16f
@@ -173,82 +215,31 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(resultText)
 
-        setContentView(scroll)
+        setContentView(scrollView)
     }
 
-    /**
-     * カメラ画面を表示
+    /*
+     * カメラを起動
      */
-    private fun showCamera() {
-
-        cameraView.visibility = View.VISIBLE
-
-        resultText.text =
-            "文字がはっきり見えるようにして、画面をタップしてください"
-
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            startCamera()
-        } else {
-            permissionLauncher.launch(
-                Manifest.permission.CAMERA
-            )
-        }
-    }
-
-    /**
-     * カメラ開始
-     */
-    private fun startCamera() {
+    private fun launchCamera() {
 
         try {
 
-            cameraThread =
-                HandlerThread("WifiScannerCamera").also {
-                    it.start()
-                }
+            photoFile = File.createTempFile(
+                "wifi_photo_",
+                ".jpg",
+                cacheDir
+            )
 
-            cameraHandler =
-                Handler(cameraThread!!.looper)
+            photoUri = FileProvider.getUriForFile(
+                this,
+                "$packageName.fileprovider",
+                photoFile
+            )
 
-            cameraView.surfaceTextureListener =
-                object : TextureView.SurfaceTextureListener {
+            resultText.text = "カメラを起動しています……"
 
-                    override fun onSurfaceTextureAvailable(
-                        surface: SurfaceTexture,
-                        width: Int,
-                        height: Int
-                    ) {
-                        openCamera()
-                    }
-
-                    override fun onSurfaceTextureSizeChanged(
-                        surface: SurfaceTexture,
-                        width: Int,
-                        height: Int
-                    ) {
-                    }
-
-                    override fun onSurfaceTextureDestroyed(
-                        surface: SurfaceTexture
-                    ): Boolean {
-
-                        return true
-                    }
-
-                    override fun onSurfaceTextureUpdated(
-                        surface: SurfaceTexture
-                    ) {
-                    }
-                }
-
-            if (cameraView.isAvailable) {
-                openCamera()
-            }
+            cameraLauncher.launch(photoUri)
 
         } catch (e: Exception) {
 
@@ -257,367 +248,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * カメラを開く
+    /*
+     * 撮影した写真をOCR
      */
-    private fun openCamera() {
+    private fun readPhoto() {
 
-        try {
+        resultText.text =
+            "写真を読み取っています……"
 
-            val manager =
-                getSystemService(Context.CAMERA_SERVICE)
-                        as CameraManager
-
-            cameraId =
-                manager.cameraIdList.firstOrNull {
-
-                    manager.getCameraCharacteristics(it)
-                        .get(
-                            CameraCharacteristics.LENS_FACING
-                        ) ==
-                            CameraCharacteristics.LENS_FACING_BACK
-
-                } ?: manager.cameraIdList.first()
-
-            if (
-                ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.CAMERA
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                return
-            }
-
-            /*
-             * 高解像度撮影用 ImageReader
-             */
-            imageReader =
-                ImageReader.newInstance(
-                    4032,
-                    3024,
-                    ImageFormat.JPEG,
-                    2
-                )
-
-            imageReader?.setOnImageAvailableListener(
-                { reader ->
-
-                    val image =
-                        reader.acquireLatestImage()
-
-                    if (image == null) {
-                        return@setOnImageAvailableListener
-                    }
-
-                    try {
-
-                        val buffer =
-                            image.planes[0].buffer
-
-                        val bytes =
-                            ByteArray(buffer.remaining())
-
-                        buffer.get(bytes)
-
-                        val bitmap =
-                            android.graphics.BitmapFactory
-                                .decodeByteArray(
-                                    bytes,
-                                    0,
-                                    bytes.size
-                                )
-
-                        if (bitmap != null) {
-
-                            runOnUiThread {
-
-                                resultText.text =
-                                    "写真を読み取っています……"
-
-                                cameraView.visibility =
-                                    View.GONE
-                            }
-
-                            closeCamera()
-
-                            readBitmap(bitmap)
-                        }
-
-                    } finally {
-
-                        image.close()
-                    }
-
-                },
-                cameraHandler
+        val bitmap =
+            BitmapFactory.decodeFile(
+                photoFile.absolutePath
             )
 
-            manager.openCamera(
-                cameraId,
-                object : CameraDevice.StateCallback() {
-
-                    override fun onOpened(
-                        camera: CameraDevice
-                    ) {
-
-                        cameraDevice = camera
-
-                        showPreview()
-                    }
-
-                    override fun onDisconnected(
-                        camera: CameraDevice
-                    ) {
-
-                        camera.close()
-                        cameraDevice = null
-                    }
-
-                    override fun onError(
-                        camera: CameraDevice,
-                        error: Int
-                    ) {
-
-                        camera.close()
-                        cameraDevice = null
-
-                        runOnUiThread {
-
-                            resultText.text =
-                                "カメラエラー：$error"
-                        }
-                    }
-
-                },
-                cameraHandler
-            )
-
-        } catch (e: Exception) {
-
-            runOnUiThread {
-
-                resultText.text =
-                    "カメラ起動エラー：${e.message}"
-            }
-        }
-    }
-
-    /**
-     * カメラプレビュー
-     */
-    private fun showPreview() {
-
-        val texture =
-            cameraView.surfaceTexture
-                ?: return
-
-        texture.setDefaultBufferSize(
-            1280,
-            720
-        )
-
-        val previewSurface =
-            Surface(texture)
-
-        val jpegSurface =
-            imageReader?.surface
-                ?: return
-
-        try {
-
-            val request =
-                cameraDevice!!
-                    .createCaptureRequest(
-                        CameraDevice.TEMPLATE_PREVIEW
-                    )
-                    .apply {
-
-                        addTarget(previewSurface)
-
-                    }
-
-            cameraDevice!!
-                .createCaptureSession(
-                    listOf(
-                        previewSurface,
-                        jpegSurface
-                    ),
-                    object :
-                        CameraCaptureSession.StateCallback() {
-
-                        override fun onConfigured(
-                            session: CameraCaptureSession
-                        ) {
-
-                            captureSession =
-                                session
-
-                            session.setRepeatingRequest(
-                                request.build(),
-                                null,
-                                cameraHandler
-                            )
-
-                            runOnUiThread {
-
-                                resultText.text =
-                                    "文字がはっきり見えたら、画面をタップして撮影"
-
-                                cameraView.setOnClickListener {
-
-                                    takePhoto()
-                                }
-                            }
-                        }
-
-                        override fun onConfigureFailed(
-                            session: CameraCaptureSession
-                        ) {
-
-                            runOnUiThread {
-
-                                resultText.text =
-                                    "カメラを準備できませんでした"
-                            }
-                        }
-                    },
-                    cameraHandler
-                )
-
-        } catch (e: Exception) {
-
-            runOnUiThread {
-
-                resultText.text =
-                    "プレビューエラー：${e.message}"
-            }
-        }
-    }
-
-    /**
-     * 高解像度で写真撮影
-     */
-    private fun takePhoto() {
-
-        val camera =
-            cameraDevice ?: return
-
-        val session =
-            captureSession ?: return
-
-        val reader =
-            imageReader ?: return
-
-        try {
-
-            cameraView.setOnClickListener(null)
+        if (bitmap == null) {
 
             resultText.text =
-                "撮影しています……"
+                "写真を開けませんでした"
 
-            val captureRequest =
-                camera.createCaptureRequest(
-                    CameraDevice.TEMPLATE_STILL_CAPTURE
-                ).apply {
-
-                    addTarget(reader.surface)
-
-                    set(
-                        CaptureRequest.CONTROL_AF_MODE,
-                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-                    )
-
-                    set(
-                        CaptureRequest.JPEG_ORIENTATION,
-                        getJpegOrientation()
-                    )
-                }
-
-            session.capture(
-                captureRequest.build(),
-                object : CameraCaptureSession.CaptureCallback() {
-
-                    override fun onCaptureCompleted(
-                        session: CameraCaptureSession,
-                        request: CaptureRequest,
-                        result: android.hardware.camera2.TotalCaptureResult
-                    ) {
-
-                        runOnUiThread {
-
-                            resultText.text =
-                                "撮影完了。文字を読み取っています……"
-                        }
-                    }
-                },
-                cameraHandler
-            )
-
-        } catch (e: Exception) {
-
-            resultText.text =
-                "撮影エラー：${e.message}"
-        }
-    }
-
-    /**
-     * 写真の向きを取得
-     */
-    private fun getJpegOrientation(): Int {
-
-        val manager =
-            getSystemService(Context.CAMERA_SERVICE)
-                    as CameraManager
-
-        val characteristics =
-            manager.getCameraCharacteristics(
-                cameraId
-            )
-
-        val sensorOrientation =
-            characteristics.get(
-                CameraCharacteristics.SENSOR_ORIENTATION
-            ) ?: 0
-
-        return sensorOrientation
-    }
-
-    /**
-     * カメラ終了
-     */
-    private fun closeCamera() {
-
-        try {
-            captureSession?.close()
-        } catch (_: Exception) {
+            return
         }
 
-        captureSession = null
-
-        try {
-            cameraDevice?.close()
-        } catch (_: Exception) {
-        }
-
-        cameraDevice = null
-
-        try {
-            imageReader?.close()
-        } catch (_: Exception) {
-        }
-
-        imageReader = null
-
-        cameraThread?.quitSafely()
-        cameraThread = null
-        cameraHandler = null
-    }
-
-    /**
-     * OCR
-     */
-    private fun readBitmap(bitmap: Bitmap) {
-
+        /*
+         * 高解像度写真をそのままML Kitへ渡す
+         */
         val image =
             InputImage.fromBitmap(
                 bitmap,
@@ -633,12 +287,13 @@ class MainActivity : AppCompatActivity() {
 
             .addOnSuccessListener { visionText ->
 
-                val text =
-                    visionText.text
+                val text = visionText.text
 
                 /*
-                 * SSID
-                 * toyoko-inn + 4桁
+                 * 東横INNのSSID
+                 *
+                 * 例：
+                 * toyoko-inn1234
                  */
                 ssid =
                     Regex(
@@ -649,8 +304,7 @@ class MainActivity : AppCompatActivity() {
                         ?: ""
 
                 /*
-                 * パスワード
-                 * 8桁の数字
+                 * 8桁の数字をパスワードとして取得
                  */
                 password =
                     Regex(
@@ -660,6 +314,9 @@ class MainActivity : AppCompatActivity() {
                         ?.value
                         ?: ""
 
+                /*
+                 * SSID表示
+                 */
                 ssidText.text =
                     if (ssid.isNotBlank()) {
 
@@ -670,6 +327,9 @@ class MainActivity : AppCompatActivity() {
                         "SSID：未検出"
                     }
 
+                /*
+                 * パスワード表示
+                 */
                 passwordText.text =
                     if (password.isNotBlank()) {
 
@@ -680,39 +340,36 @@ class MainActivity : AppCompatActivity() {
                         "パスワード：未検出"
                     }
 
-                connectButton.visibility =
-                    if (
-                        ssid.isNotBlank() &&
-                        password.isNotBlank()
-                    ) {
+                /*
+                 * 両方取得できたら
+                 * Wi-Fi接続ボタンを表示
+                 */
+                if (
+                    ssid.isNotBlank() &&
+                    password.isNotBlank()
+                ) {
 
+                    connectButton.visibility =
                         View.VISIBLE
 
-                    } else {
+                    resultText.text =
+                        "読み取り成功！\n\n「Wi-Fiに接続」を押してください。"
 
+                } else {
+
+                    connectButton.visibility =
                         View.GONE
-                    }
 
-                resultText.text =
-                    when {
+                    resultText.text =
+                        if (text.isBlank()) {
 
-                        ssid.isBlank() &&
-                                password.isBlank() ->
+                            "文字を読み取れませんでした。\nもう一度撮影してください。"
 
-                            "SSIDとパスワードを読み取れませんでした。\nもう一度撮影してください。\n\n$text"
+                        } else {
 
-                        ssid.isBlank() ->
-
-                            "SSIDを読み取れませんでした。\nもう一度撮影してください。\n\n$text"
-
-                        password.isBlank() ->
-
-                            "パスワードを読み取れませんでした。\nもう一度撮影してください。\n\n$text"
-
-                        else ->
-
-                            "読み取り成功！\n「Wi-Fiに接続」を押してください。"
-                    }
+                            "SSIDまたはパスワードを読み取れませんでした。\n\n読み取った文字：\n$text"
+                        }
+                }
             }
 
             .addOnFailureListener { error ->
@@ -723,22 +380,27 @@ class MainActivity : AppCompatActivity() {
 
             .addOnCompleteListener {
 
+                /*
+                 * OCR終了後にBitmapを解放
+                 */
                 bitmap.recycle()
+
+                /*
+                 * 一時ファイル削除
+                 */
+                photoFile.delete()
             }
     }
 
-    /**
-     * Wi-Fi接続
+    /*
+     * AndroidのWi-Fi接続確認画面を呼び出す
      */
     private fun requestWifiConnection() {
 
-        if (
-            Build.VERSION.SDK_INT <
-            Build.VERSION_CODES.Q
-        ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
 
             resultText.text =
-                "このAndroidバージョンでは接続リクエスト方式に対応していません"
+                "このAndroidバージョンでは、この接続方式に対応していません"
 
             return
         }
@@ -756,20 +418,24 @@ class MainActivity : AppCompatActivity() {
 
         try {
 
+            /*
+             * WPA2 Wi-Fiとして接続要求
+             */
             val specifier =
                 WifiNetworkSpecifier.Builder()
                     .setSsid(ssid)
                     .setWpa2Passphrase(password)
                     .build()
 
+            /*
+             * Wi-Fiネットワークを要求
+             */
             val request =
                 NetworkRequest.Builder()
                     .addTransportType(
                         NetworkCapabilities.TRANSPORT_WIFI
                     )
-                    .setNetworkSpecifier(
-                        specifier
-                    )
+                    .setNetworkSpecifier(specifier)
                     .build()
 
             val connectivityManager =
@@ -777,6 +443,9 @@ class MainActivity : AppCompatActivity() {
                     Context.CONNECTIVITY_SERVICE
                 ) as ConnectivityManager
 
+            /*
+             * 前回の接続要求が残っていたら解除
+             */
             networkCallback?.let {
 
                 try {
@@ -788,6 +457,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            /*
+             * 接続結果
+             */
             val callback =
                 object :
                     ConnectivityManager.NetworkCallback() {
@@ -796,4 +468,107 @@ class MainActivity : AppCompatActivity() {
                         network: Network
                     ) {
 
-   
+                        runOnUiThread {
+
+                            resultText.text =
+                                "Wi-Fiネットワークに接続しました"
+                        }
+                    }
+
+                    override fun onUnavailable() {
+
+                        runOnUiThread {
+
+                            resultText.text =
+                                "接続できませんでした。\n\nパスワードやWi-Fi方式を確認してください。"
+                        }
+                    }
+
+                    override fun onLost(
+                        network: Network
+                    ) {
+
+                        runOnUiThread {
+
+                            resultText.text =
+                                "Wi-Fi接続が切断されました"
+                        }
+                    }
+                }
+
+            networkCallback = callback
+
+            /*
+             * Androidへ接続要求
+             */
+            connectivityManager.requestNetwork(
+                request,
+                callback
+            )
+
+            resultText.text =
+                "Androidの確認画面で接続を許可してください"
+
+        } catch (e: Exception) {
+
+            resultText.text =
+                "接続リクエストエラー：${e.message}"
+        }
+    }
+
+    /*
+     * 文字列をクリップボードへコピー
+     */
+    private fun copyText(
+        label: String,
+        value: String
+    ) {
+
+        if (value.isBlank()) {
+
+            resultText.text =
+                "$label が見つかっていません"
+
+            return
+        }
+
+        val clipboard =
+            getSystemService(
+                Context.CLIPBOARD_SERVICE
+            ) as ClipboardManager
+
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText(
+                label,
+                value
+            )
+        )
+
+        resultText.text =
+            "$label をコピーしました"
+    }
+
+    override fun onDestroy() {
+
+        /*
+         * Wi-Fi接続要求を解除
+         */
+        networkCallback?.let {
+
+            try {
+
+                val connectivityManager =
+                    getSystemService(
+                        Context.CONNECTIVITY_SERVICE
+                    ) as ConnectivityManager
+
+                connectivityManager
+                    .unregisterNetworkCallback(it)
+
+            } catch (_: Exception) {
+            }
+        }
+
+        super.onDestroy()
+    }
+}
